@@ -1,0 +1,27 @@
+cat > .gitignore <<'EOF'
+# Build output
+build/
+*.o
+*.a
+*.d
+*.elf
+*.map
+*.hex
+*.bin
+*.lst
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+.DS_Store
+
+# OS cruft
+Thumbs.db
+
+# CubeMX (optional if you have it)
+*.ioc.bak
+EOF
+
