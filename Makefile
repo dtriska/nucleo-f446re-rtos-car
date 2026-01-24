@@ -12,7 +12,7 @@ TARGET = nucleo_f446re_blinky
 # build options
 ######################################
 DEBUG = 1
-OPT   = -O0
+OPT   = -Og
 
 ######################################
 # paths
