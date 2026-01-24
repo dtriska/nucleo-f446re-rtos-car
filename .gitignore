@@ -9,6 +9,8 @@ build/
 *.bin
 *.lst
 
+.cache/
+
 # IDE/editor
 .vscode/
 .idea/
