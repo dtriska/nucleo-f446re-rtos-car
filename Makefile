@@ -27,7 +27,9 @@ Core/Src/main.c \
 Core/Src/system_stm32f4xx.c \
 Core/Src/stm32f4xx_it.c \
 Core/Src/newlib_stubs.c \
-Core/Src/sysmem.c 
+Core/Src/sysmem.c \
+Core/Src/gpio.c \
+Core/Src/uart.c
 
 ASM_SOURCES = \
 startup_stm32f446xx.s
