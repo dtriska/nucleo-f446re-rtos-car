@@ -10,15 +10,22 @@
 extern "C" {
 #endif
 
-/* USART2 TX-only driver (polling)
- * TX pin: PA2 (AF7)
- */
+#define MAX_LENGTH 32
+#define UART_RX_ERR_MASK (USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE)
 
-void usart2_init_tx(uint32_t baud);
+void usart2_init(uint32_t baud, bool tx, bool rx);
+
+void usart2_init_tx();
+
+void usart2_init_rx();
 
 bool usart2_write_byte(uint8_t b);
 
-bool usart2_write_string(const char* s, size_t len);
+bool usart2_write_string(const uint8_t* s, size_t len);
+
+void usart2_read_byte(uint8_t* out, uint32_t* err_flags);
+
+bool usart2_read_string(uint8_t* c);
 
 #ifdef __cplusplus
 }
