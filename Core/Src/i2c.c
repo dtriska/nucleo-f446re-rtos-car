@@ -153,14 +153,225 @@ bool i2c1_write(uint8_t addr7,
                 size_t len,
                 uint32_t* err_flags)
 {
+    if (err_flags == NULL) return false;
+    if (len > 0 && data == NULL) return false;
 
+    *err_flags = 0;
+    I2C1->CR1 |= I2C_CR1_START;
+    while (!(I2C1->SR1 & I2C_SR1_SB)) {}
+
+    I2C1->DR  = (uint8_t)(addr7 << 1u);
+    while (1) 
+    {
+        uint32_t sr = I2C1->SR1;
+
+        if (sr & I2C_ERR_MASK)
+        {
+            *err_flags = sr & I2C_ERR_MASK;
+            I2C1->CR1 |= I2C_CR1_STOP;
+            I2C1->SR1 &= ~I2C_SR1_AF;
+            return false;
+        }
+
+        if (sr & I2C_SR1_ADDR)
+        {
+            (void)I2C1->SR1;
+            (void)I2C1->SR2;
+            break;
+        }
+    } 
+
+    if (len == 0)
+    {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return true;
+    }
+
+    size_t i = 0;
+    while (i < len)
+    {
+        uint32_t sr = I2C1->SR1;
+        if (sr & I2C_ERR_MASK)
+        {
+            *err_flags = sr & I2C_ERR_MASK;
+            I2C1->CR1 |= I2C_CR1_STOP;
+            I2C1->SR1 &= ~I2C_SR1_AF;
+            return false;
+        }
+        if (sr & I2C_SR1_TXE)
+        {
+            I2C1->DR = data[i];
+            i++;
+        }
+    }
+    
+    while (1) 
+    {
+        uint32_t sr = I2C1->SR1;
+
+        if (sr & I2C_ERR_MASK)
+        {
+            *err_flags = sr & I2C_ERR_MASK;
+            I2C1->CR1 |= I2C_CR1_STOP;
+            I2C1->SR1 &= ~I2C_SR1_AF;
+            return false;
+        }
+
+        if (sr & I2C_SR1_BTF)
+        {
+            break;
+        }
+    }
+
+    I2C1->CR1 |= I2C_CR1_STOP;
+    return true;
 }
 
-/* Read raw bytes */
+/* Helper: check SR1 errors, record, STOP, clear AF, return false */
+static bool I2c_fail_with_sr(uint32_t sr, uint32_t* err_flags) 
+{                      
+        *err_flags = ((sr) & I2C_ERR_MASK);                
+        I2C1->CR1 |= I2C_CR1_STOP;                          
+        if ((sr) & I2C_SR1_AF) 
+        { 
+            I2C1->SR1 &= ~I2C_SR1_AF; 
+        } 
+        return false;                                       
+}
+
+/* Read raw bytes (master receiver, polling)
+ */
 bool i2c1_read(uint8_t addr7,
                uint8_t* data,
                size_t len,
-               uint32_t* err_flags);
+               uint32_t* err_flags)
+{
+    if (err_flags == NULL) return false;
+    *err_flags = 0;
+
+    if (len == 0) return false;
+    if (data == NULL) return false;
+
+    /* Start */
+    I2C1->CR1 |= I2C_CR1_START;
+    while (1) 
+    {
+        uint32_t sr = I2C1->SR1;
+        if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+        if (sr & I2C_SR1_SB) break;
+    }
+
+    I2C1->DR = (uint8_t)((addr7 << 1u) | 1u);  /* R : 1, W : 0 */
+
+    /* Wait for ADDR or error */
+    while (1) 
+    {
+        uint32_t sr = I2C1->SR1;
+        if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+        if (sr & I2C_SR1_ADDR) break;
+    }
+
+    if (len == 1) 
+    {
+        /* 1 byte:
+         * - NACK the single byte: ACK=0 while ADDR is set
+         * - Clear ADDR
+         * - STOP immediately
+         * - Wait RXNE and read DR
+         */
+        I2C1->CR1 &= ~I2C_CR1_ACK;
+
+        (void)I2C1->SR1;
+        (void)I2C1->SR2;
+
+        I2C1->CR1 |= I2C_CR1_STOP;
+
+        while (!(I2C1->SR1 & I2C_SR1_RXNE)) 
+        {
+            uint32_t sr = I2C1->SR1;
+            if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+        }
+
+        data[0] = (uint8_t)I2C1->DR;
+        return true;
+    }
+
+    if (len == 2) 
+    {
+        /* 2 bytes:
+         * - ACK=0 while ADDR is set so second byte is NACKed
+         * - Clear ADDR
+         * - Wait BTF 
+         * - STOP, then read DR twice
+         */
+        I2C1->CR1 &= ~I2C_CR1_ACK;
+
+        (void)I2C1->SR1;
+        (void)I2C1->SR2;
+
+        while (1) 
+        {
+            uint32_t sr = I2C1->SR1;
+            if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+            if (sr & I2C_SR1_BTF) break;
+        }
+
+        I2C1->CR1 |= I2C_CR1_STOP;
+
+        data[0] = (uint8_t)I2C1->DR;
+        data[1] = (uint8_t)I2C1->DR;
+        return true;
+    }
+
+    /* len >= 3:
+     * - ACK=1 for streaming
+     * - Clear ADDR
+     * - Read bytes until 3 remain
+     * - Then perform last-3 sequence:
+     *   wait BTF, ACK=0, read N-2, wait BTF, STOP, read N-1, read N
+     */
+    I2C1->CR1 |= I2C_CR1_ACK;
+
+    (void)I2C1->SR1;
+    (void)I2C1->SR2;
+
+    size_t i = 0;
+
+    /* Read until only 3 bytes left */
+    while (i < (len - 3u)) 
+    {
+        uint32_t sr = I2C1->SR1;
+        if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+
+        if (sr & I2C_SR1_RXNE) 
+        {
+            data[i++] = (uint8_t)I2C1->DR;
+        }
+    }
+
+    /* Last 3 bytes sequence (use BTF rather than RXNE) */
+    while (1)
+    {
+        uint32_t sr = I2C1->SR1;
+        if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+        if (sr & I2C_SR1_BTF) break;
+    }
+
+    I2C1->CR1 &= ~I2C_CR1_ACK;          /* prepare to NACK final bytes */
+    data[i++] = (uint8_t)I2C1->DR;      /* read N-2 */
+
+    while (!(I2C1->SR1 & I2C_SR1_BTF)) 
+    {
+        uint32_t sr = I2C1->SR1;
+        if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+    }
+
+    I2C1->CR1 |= I2C_CR1_STOP;          /* STOP then drain last two bytes */
+    data[i++] = (uint8_t)I2C1->DR;      /* read N-1 */
+    data[i] = (uint8_t)I2C1->DR;      /* read N   */
+
+    return true;
+}
 
 bool i2c1_write_read(uint8_t addr7,
                      const uint8_t* wdata,
@@ -175,12 +386,10 @@ bool i2c1_write_read(uint8_t addr7,
 /* --------- Convenience helpers (typical sensors) --------- */
 
 /* Write one 8-bit register */
-bool i2c1_write_reg8(uint8_t addr7,
-                     uint8_t reg,
-                     uint8_t val,
+bool i2c1_write_reg8(uint8_t val,
                      uint32_t* err_flags)
-{
-
+{ 
+    I2C1->DR  = val;
 }
 
 /* Read one 8-bit register */

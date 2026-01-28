@@ -52,9 +52,7 @@ bool i2c1_write_read(uint8_t addr7,
                      uint32_t* err_flags);
 
 /* Write one 8-bit register */
-bool i2c1_write_reg8(uint8_t addr7,
-                     uint8_t reg,
-                     uint8_t val,
+bool i2c1_write_reg8(uint8_t val,
                      uint32_t* err_flags);
 
 /* Read one 8-bit register */
