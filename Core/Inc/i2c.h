@@ -36,7 +36,8 @@ bool i2c1_probe(uint8_t addr7, uint32_t* err_flags);
 bool i2c1_write(uint8_t addr7,
                 const uint8_t* data,
                 size_t len,
-                uint32_t* err_flags);
+                uint32_t* err_flags,
+                bool send_stop);
 
 /* Read raw bytes */
 bool i2c1_read(uint8_t addr7,

@@ -151,7 +151,8 @@ bool i2c1_probe(uint8_t addr7, uint32_t* err_flags)
 bool i2c1_write(uint8_t addr7,
                 const uint8_t* data,
                 size_t len,
-                uint32_t* err_flags)
+                uint32_t* err_flags,
+                bool send_stop)
 {
     if (err_flags == NULL) return false;
     if (len > 0 && data == NULL) return false;
@@ -183,6 +184,7 @@ bool i2c1_write(uint8_t addr7,
 
     if (len == 0)
     {
+        if (!send_stop) return true;
         I2C1->CR1 |= I2C_CR1_STOP;
         return true;
     }
@@ -222,7 +224,8 @@ bool i2c1_write(uint8_t addr7,
             break;
         }
     }
-
+    
+    if (!send_stop) return true;
     I2C1->CR1 |= I2C_CR1_STOP;
     return true;
 }
@@ -380,7 +383,12 @@ bool i2c1_write_read(uint8_t addr7,
                      size_t rlen,
                      uint32_t* err_flags)
 {
-
+    if (wlen == 0 || rlen == 0) return false;
+    if (i2c1_write(addr7, wdata, wlen, err_flags, false))
+    {
+        return i2c1_read(addr7, rdata, rlen, err_flags);
+    }
+    return false;
 }
 
 /* --------- Convenience helpers (typical sensors) --------- */

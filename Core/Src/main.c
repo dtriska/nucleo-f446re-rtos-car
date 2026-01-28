@@ -68,6 +68,7 @@ int main(void)
             uint8_t out;
             //bool ok = i2c1_probe(imu_addr7, &err);
             uint8_t data = 0x75;
+            /*
             bool okW = i2c1_write(imu_addr7, &data, 1, &err);
             if (!okW)
             {
@@ -78,7 +79,8 @@ int main(void)
             }
             //bool ok = i2c1_who_am_i(imu_addr7, &out);
             bool ok = i2c1_read(imu_addr7, &out, 1, &err);
-
+*/
+            bool ok = i2c1_write_read(imu_addr7, &data, 1, &out, 1, &err);
             const char prefix[] = "\r\nMPU6050 WHO_AM_I: ";
             usart2_write_string((const uint8_t*)prefix, sizeof(prefix) - 1);
             usart2_write_hex8((uint8_t)(imu_addr7 << 1)); // show 8-bit address
