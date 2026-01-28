@@ -52,101 +52,6 @@ void i2c1_init(uint32_t pclk1_hz, uint32_t i2c_hz)
     I2C1->CR1 |= I2C_CR1_PE;
 }
 
-bool i2c1_who_am_i(uint8_t addr7, uint8_t* out)
-{
-    uint32_t err;
-
-    I2C1->CR1 |= I2C_CR1_START;
-    while (!(I2C1->SR1 & I2C_SR1_SB)) {}
-
-    I2C1->DR  = (uint8_t)(addr7 << 1u);
-
-    while(1)
-    {
-        uint32_t sr = I2C1->SR1;
-        if (sr & I2C_ERR_MASK)
-        {
-            err = sr & I2C_ERR_MASK;
-            I2C1->CR1 |= I2C_CR1_STOP;
-            I2C1->SR1 &= ~I2C_SR1_AF;
-            return false;
-        }
-
-        if (sr & I2C_SR1_ADDR)
-        {
-            (void)I2C1->SR1;
-            (void)I2C1->SR2;
-            break;
-        }
-    }
-
-    while(!(I2C1->SR1 & I2C_SR1_TXE)) {}
-    I2C1->DR = 0x75;
-    while(!(I2C1->SR1 & I2C_SR1_BTF)) {}
-
-    I2C1->CR1 |= I2C_CR1_START;
-    while (!(I2C1->SR1 & I2C_SR1_SB)) {}
-
-    I2C1->DR  = (uint8_t)((addr7 << 1u) | 1u);
-    while (1) 
-    {
-        uint32_t sr = I2C1->SR1;
-        if (sr & I2C_ERR_MASK)
-        {
-            err = sr & I2C_ERR_MASK;
-            I2C1->CR1 |= I2C_CR1_STOP;
-            I2C1->SR1 &= ~I2C_SR1_AF;
-            return false;
-        }
-        if (sr & I2C_SR1_ADDR)
-        {
-            break;
-        }
-    }
-
-    I2C1->CR1 &= ~I2C_CR1_ACK;
-    (void)I2C1->SR1;
-    (void)I2C1->SR2;
-
-    I2C1->CR1 |= I2C_CR1_STOP;
-
-    while(!(I2C1->SR1 & I2C_SR1_RXNE)) {}
-    *out = I2C1->DR;
-
-    return true;
-}
-
-/* Probe: generates START + address(W). Returns true if ACK. */
-bool i2c1_probe(uint8_t addr7, uint32_t* err_flags)
-{
-    if (err_flags) *err_flags = 0;
-
-    I2C1->CR1 |= I2C_CR1_START;
-    while (!(I2C1->SR1 & I2C_SR1_SB)) {}
-
-    I2C1->DR  = (uint8_t)(addr7 << 1u);
-    while (1) 
-    {
-        uint32_t sr = I2C1->SR1;
-
-        if (sr & I2C_ERR_MASK)
-        {
-            *err_flags = sr & I2C_ERR_MASK;
-            I2C1->CR1 |= I2C_CR1_STOP;
-            I2C1->SR1 &= ~I2C_SR1_AF;
-            return false;
-        }
-
-        if (sr & I2C_SR1_ADDR)
-        {
-            (void)I2C1->SR1;
-            (void)I2C1->SR2;
-            I2C1->CR1 |= I2C_CR1_STOP;
-            return true;
-        }
-    } 
-}
-
 /* Write raw bytes */
 bool i2c1_write(uint8_t addr7,
                 const uint8_t* data,
@@ -389,34 +294,6 @@ bool i2c1_write_read(uint8_t addr7,
         return i2c1_read(addr7, rdata, rlen, err_flags);
     }
     return false;
-}
-
-/* --------- Convenience helpers (typical sensors) --------- */
-
-/* Write one 8-bit register */
-bool i2c1_write_reg8(uint8_t val,
-                     uint32_t* err_flags)
-{ 
-    I2C1->DR  = val;
-}
-
-/* Read one 8-bit register */
-bool i2c1_read_reg8(uint8_t addr7,
-                    uint8_t reg,
-                    uint8_t* val,
-                    uint32_t* err_flags)
-{
-
-}
-
-/* Burst read starting at 8-bit register */
-bool i2c1_read_reg_n(uint8_t addr7,
-                     uint8_t reg,
-                     uint8_t* buf,
-                     size_t n,
-                     uint32_t* err_flags)
-{
-
 }
 
 
