@@ -65,9 +65,12 @@ int main(void)
         if (do_probe)
         {
             uint32_t err = 0;
-            uint8_t out;
+            uint8_t out[6];
             //bool ok = i2c1_probe(imu_addr7, &err);
-            uint8_t data = 0x75;
+            uint8_t data = 0x3B;
+            uint8_t wake[2] = { 0x6B, 0x00 };
+            i2c1_write(imu_addr7, wake, 2, &err, true);
+                        
             /*
             bool okW = i2c1_write(imu_addr7, &data, 1, &err);
             if (!okW)
@@ -80,19 +83,24 @@ int main(void)
             //bool ok = i2c1_who_am_i(imu_addr7, &out);
             bool ok = i2c1_read(imu_addr7, &out, 1, &err);
 */
-            bool ok = i2c1_write_read(imu_addr7, &data, 1, &out, 1, &err);
-            const char prefix[] = "\r\nMPU6050 WHO_AM_I: ";
+            bool ok = i2c1_write_read(imu_addr7, &data, 1, out, 6, &err);
+            const char prefix[] = "\r\nMPU6050 Accel: ";
             usart2_write_string((const uint8_t*)prefix, sizeof(prefix) - 1);
             usart2_write_hex8((uint8_t)(imu_addr7 << 1)); // show 8-bit address
 
             if (ok)
             {
-                const char okmsg[] = " : ACK\r\n";
-                usart2_write_string((const uint8_t*)okmsg, sizeof(okmsg) - 1);
-                const char outmsg[] = "OUT: \r\n";
+                //const char okmsg[] = " : ACK\r\n";
+                //usart2_write_string((const uint8_t*)okmsg, sizeof(okmsg) - 1);
+                const char outmsg[] = "ACCEL: \r\n";
+                const char space[] = " ";
                 usart2_write_string((const uint8_t*)outmsg, sizeof(outmsg) - 1);
                 //usart2_write_string(&out, 1);
-                usart2_write_hex8(out);
+                for (size_t i = 0; i < 6; i++)
+                {
+                    usart2_write_hex8(out[i]);
+                    usart2_write_string((const uint8_t*)space, sizeof(space) - 1);
+                }
                 const char crlf[] = "\r\n";
                 usart2_write_string((const uint8_t*)crlf, sizeof(crlf) - 1);
             }
