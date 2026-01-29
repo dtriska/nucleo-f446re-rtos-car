@@ -20,6 +20,13 @@ extern "C" {
  */
 #define I2C_ERR_MASK (I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_AF | I2C_SR1_OVR | I2C_SR1_TIMEOUT)
 
+// Driver-level software error flags 
+#define I2C_ERR_SW_TIMEOUT   (1u << 31)  // loop timeout expired
+#define I2C_ERR_SW_BAD_PARAM (1u << 30)  // bad args
+#define I2C_ERR_SW_BUSY      (1u << 29)  // bus stayed busy / stuck
+
+#define I2C_TIMEOUT_DELAY           16000000
+
 /* --------- Init / basic control --------- */
 
 /* Initialize I2C1 as master.

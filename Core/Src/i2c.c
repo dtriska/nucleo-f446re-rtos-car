@@ -52,6 +52,15 @@ void i2c1_init(uint32_t pclk1_hz, uint32_t i2c_hz)
     I2C1->CR1 |= I2C_CR1_PE;
 }
 
+static bool i2c_sw_timeout_abort(uint32_t* err_flags)
+{
+    if (err_flags) *err_flags |= I2C_ERR_SW_TIMEOUT;
+
+    I2C1->CR1 |= I2C_CR1_STOP;          // request STOP
+    I2C1->SR1 &= ~I2C_SR1_AF;           // clear AF if it was set
+    return false;
+}
+
 /* Write raw bytes */
 bool i2c1_write(uint8_t addr7,
                 const uint8_t* data,
@@ -60,13 +69,23 @@ bool i2c1_write(uint8_t addr7,
                 bool send_stop)
 {
     if (err_flags == NULL) return false;
-    if (len > 0 && data == NULL) return false;
+    *err_flags = 0;
+    if (len > 0 && data == NULL) 
+    {
+        *err_flags |= I2C_ERR_SW_BAD_PARAM;
+        return false;
+    }
 
     *err_flags = 0;
+    size_t t = I2C_TIMEOUT_DELAY;
     I2C1->CR1 |= I2C_CR1_START;
-    while (!(I2C1->SR1 & I2C_SR1_SB)) {}
+    while (!(I2C1->SR1 & I2C_SR1_SB)) 
+    {
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
+    }
 
     I2C1->DR  = (uint8_t)(addr7 << 1u);
+    t = I2C_TIMEOUT_DELAY;
     while (1) 
     {
         uint32_t sr = I2C1->SR1;
@@ -85,6 +104,7 @@ bool i2c1_write(uint8_t addr7,
             (void)I2C1->SR2;
             break;
         }
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     } 
 
     if (len == 0)
@@ -95,6 +115,7 @@ bool i2c1_write(uint8_t addr7,
     }
 
     size_t i = 0;
+    t = I2C_TIMEOUT_DELAY;
     while (i < len)
     {
         uint32_t sr = I2C1->SR1;
@@ -110,8 +131,10 @@ bool i2c1_write(uint8_t addr7,
             I2C1->DR = data[i];
             i++;
         }
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     }
     
+    t = I2C_TIMEOUT_DELAY;
     while (1) 
     {
         uint32_t sr = I2C1->SR1;
@@ -128,6 +151,8 @@ bool i2c1_write(uint8_t addr7,
         {
             break;
         }
+
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     }
     
     if (!send_stop) return true;
@@ -157,28 +182,36 @@ bool i2c1_read(uint8_t addr7,
     if (err_flags == NULL) return false;
     *err_flags = 0;
 
-    if (len == 0) return false;
-    if (data == NULL) return false;
+    if (len == 0 || data == NULL) 
+    {
+        *err_flags |= I2C_ERR_SW_BAD_PARAM;
+        return false;
+    }
 
     /* Start */
     I2C1->CR1 |= I2C_CR1_START;
+    size_t t = I2C_TIMEOUT_DELAY;
     while (1) 
     {
         uint32_t sr = I2C1->SR1;
         if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
         if (sr & I2C_SR1_SB) break;
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     }
 
     I2C1->DR = (uint8_t)((addr7 << 1u) | 1u);  /* R : 1, W : 0 */
 
     /* Wait for ADDR or error */
+    t = I2C_TIMEOUT_DELAY;
     while (1) 
     {
         uint32_t sr = I2C1->SR1;
         if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
         if (sr & I2C_SR1_ADDR) break;
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     }
 
+    t = I2C_TIMEOUT_DELAY;
     if (len == 1) 
     {
         /* 1 byte:
@@ -198,6 +231,7 @@ bool i2c1_read(uint8_t addr7,
         {
             uint32_t sr = I2C1->SR1;
             if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+            if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
         }
 
         data[0] = (uint8_t)I2C1->DR;
@@ -222,6 +256,7 @@ bool i2c1_read(uint8_t addr7,
             uint32_t sr = I2C1->SR1;
             if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
             if (sr & I2C_SR1_BTF) break;
+            if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
         }
 
         I2C1->CR1 |= I2C_CR1_STOP;
@@ -254,24 +289,30 @@ bool i2c1_read(uint8_t addr7,
         if (sr & I2C_SR1_RXNE) 
         {
             data[i++] = (uint8_t)I2C1->DR;
+            t = I2C_TIMEOUT_DELAY;
         }
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     }
-
+    
+    t = I2C_TIMEOUT_DELAY;
     /* Last 3 bytes sequence (use BTF rather than RXNE) */
     while (1)
     {
         uint32_t sr = I2C1->SR1;
         if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
         if (sr & I2C_SR1_BTF) break;
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     }
 
     I2C1->CR1 &= ~I2C_CR1_ACK;          /* prepare to NACK final bytes */
     data[i++] = (uint8_t)I2C1->DR;      /* read N-2 */
 
+    t = I2C_TIMEOUT_DELAY;
     while (!(I2C1->SR1 & I2C_SR1_BTF)) 
     {
         uint32_t sr = I2C1->SR1;
         if (sr & I2C_ERR_MASK) return I2c_fail_with_sr(sr, err_flags);
+        if (t-- == 0) return i2c_sw_timeout_abort(err_flags);
     }
 
     I2C1->CR1 |= I2C_CR1_STOP;          /* STOP then drain last two bytes */
