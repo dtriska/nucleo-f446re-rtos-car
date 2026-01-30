@@ -1,21 +1,29 @@
 /**
-  * @file           : main.c
-  * @brief          : Main program body
+  * @file    main.c
   */
+
 #include "gpio.h"
 #include "uart.h"
 #include "i2c.h"
+#include "i2c_int.h"
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 
-/* Private function prototypes -----------------------------------------------*/
-void SystemClock_Config(void);
+/* ---------- local helpers ---------- */
 
-static void delay(volatile uint32_t cnt);
 static void delay(volatile uint32_t cnt)
 {
-    while (cnt > 0) { cnt--; }
+    while (cnt--) { __asm volatile ("nop"); }
+}
+
+static void usart2_write_cstr(const char *s)
+{
+    const uint8_t *p = (const uint8_t *)s;
+    size_t n = 0;
+    while (p[n] != 0) n++;
+    usart2_write_string(p, n);
 }
 
 static void usart2_write_hex8(uint8_t v)
@@ -27,113 +35,171 @@ static void usart2_write_hex8(uint8_t v)
     usart2_write_string(out, 2);
 }
 
+/* ---------- MPU6050 test config ---------- */
+
+#define IMU_ADDR7        0x68u
+#define UART_RX_MAX      64u
+
+/* Shared state for async completion */
+static volatile bool g_i2c_done = false;
+static volatile i2c_status_t g_i2c_status = I2C_STATUS_ERR;
+static volatile uint32_t g_i2c_err = 0;
+
+static uint8_t g_rx6[6] = {0};
+static uint8_t g_wake2[2] = { 0x6B, 0x00 }; /* PWR_MGMT_1 <- 0 */
+static uint8_t g_reg_accel = 0x3B;         /* ACCEL_XOUT_H */
+
+static void i2c_done_cb(i2c_status_t status, uint32_t err_flags, void *user)
+{
+    (void)user;
+    g_i2c_status = status;
+    g_i2c_err = err_flags;
+    g_i2c_done = true;
+}
+
+static bool streq_cmd(const uint8_t *buf, const char *cmd)
+{
+    size_t i = 0;
+    while (cmd[i] != 0)
+    {
+        if (buf[i] != (uint8_t)cmd[i]) return false;
+        i++;
+    }
+    /* allow trailing CR/LF or 0 */
+    return (buf[i] == 0 || buf[i] == '\r' || buf[i] == '\n');
+}
+
+/* ---------- main ---------- */
+
 int main(void)
 {
-    // SystemClock_Config();
+    // SystemClock_Config(); 
 
-    // LED (PA5)
+    /* LED (PA5) */
     gpio_enable_clock(GPIOA);
     gpio_config_output(GPIOA, 5, GPIO_OUTPUT_PP, GPIO_PULL_NONE, GPIO_SPEED_MEDIUM);
 
-    // UART
+    /* UART */
     usart2_init(115200, true, true);
+    usart2_write_cstr("\r\nBoot\r\nType: i2c\r\n");
 
-    i2c1_init(16000000u, 100000u);
+    /* I2C IRQ driver */
+    i2c1_init_irq(16000000u, 100000u);
 
-    const uint8_t imu_addr7 = 0x68; 
-    uint8_t rx[MAX_LENGTH];
+    uint8_t rx[UART_RX_MAX] = {0};
 
     while (1)
     {
         gpio_set(GPIOA, 5);
 
-        // Clear RX buffer
-        for (size_t i = 0; i < sizeof(rx); i++) rx[i] = 0;
+        /* Clear RX buffer */
+        for (size_t i = 0; i < UART_RX_MAX; i++) rx[i] = 0;
 
-        // Wait for a command over UART
+        /* Blocking read line */
         usart2_read_string(rx);
 
-        // Echo back
-        size_t n = 0;
-        while (n < sizeof(rx) && rx[n] != 0) n++;
-        usart2_write_string(rx, n);
-
-        // Send i2c
-        bool do_probe = false;
-        if (n >= 3 && rx[0] == 'i' && rx[1] == '2' && rx[2] == 'c') do_probe = true;
-
-        if (do_probe)
+        /* Echo */
         {
-            uint32_t err = 0;
-            uint8_t out[6];
-            //bool ok = i2c1_probe(imu_addr7, &err);
-            uint8_t data = 0x3B;
-            uint8_t wake[2] = { 0x6B, 0x00 };
-            i2c1_write(imu_addr7, wake, 2, &err, true);
-                        
-            /*
-            bool okW = i2c1_write(imu_addr7, &data, 1, &err);
-            if (!okW)
-            {
-                const char failure[] = "\r\nOK_WRITE FAILURE\r\n";
-                usart2_write_string((const uint8_t *)failure, sizeof(failure) - 1);
-                usart2_write_hex8(err);
-                while (1) {}
-            }
-            //bool ok = i2c1_who_am_i(imu_addr7, &out);
-            bool ok = i2c1_read(imu_addr7, &out, 1, &err);
-*/
-            bool ok = i2c1_write_read(imu_addr7, &data, 1, out, 6, &err);
-            const char prefix[] = "\r\nMPU6050 Accel: ";
-            usart2_write_string((const uint8_t*)prefix, sizeof(prefix) - 1);
-            usart2_write_hex8((uint8_t)(imu_addr7 << 1)); // show 8-bit address
+            size_t n = 0;
+            while (n < UART_RX_MAX && rx[n] != 0) n++;
+            usart2_write_string(rx, n);
+            usart2_write_cstr("\r\n");
+        }
 
-            if (ok)
+        if (streq_cmd(rx, "i2c") || streq_cmd(rx, "probe"))
+        {
+            /* 1) Wake MPU6050: write {0x6B,0x00} */
             {
-                //const char okmsg[] = " : ACK\r\n";
-                //usart2_write_string((const uint8_t*)okmsg, sizeof(okmsg) - 1);
-                const char outmsg[] = "ACCEL: \r\n";
-                const char space[] = " ";
-                usart2_write_string((const uint8_t*)outmsg, sizeof(outmsg) - 1);
-                //usart2_write_string(&out, 1);
-                for (size_t i = 0; i < 6; i++)
+                i2c_xfer_t x = {0};
+                x.addr7  = IMU_ADDR7;
+                x.kind   = I2C_XFER_TX;
+                x.tx     = g_wake2;
+                x.tx_len = sizeof(g_wake2);
+                x.opts   = I2C_OPT_SEND_STOP;
+                x.done   = i2c_done_cb;
+                x.user   = NULL;
+
+                g_i2c_done = false;
+                if (!i2c1_submit(&x))
                 {
-                    usart2_write_hex8(out[i]);
-                    usart2_write_string((const uint8_t*)space, sizeof(space) - 1);
+                    usart2_write_cstr("i2c1_submit(wake) failed (busy/bad param)\r\n");
+                    goto loop_end;
                 }
-                const char crlf[] = "\r\n";
-                usart2_write_string((const uint8_t*)crlf, sizeof(crlf) - 1);
+
+                while (!g_i2c_done) { /* spin me round baby */ }
+
+                if (g_i2c_status != I2C_STATUS_OK)
+                {
+                    usart2_write_cstr("WAKE ERR flags=0x");
+                    usart2_write_hex8((uint8_t)((g_i2c_err >> 24) & 0xFF));
+                    usart2_write_hex8((uint8_t)((g_i2c_err >> 16) & 0xFF));
+                    usart2_write_hex8((uint8_t)((g_i2c_err >>  8) & 0xFF));
+                    usart2_write_hex8((uint8_t)((g_i2c_err >>  0) & 0xFF));
+                    usart2_write_cstr("\r\n");
+                    goto loop_end;
+                }
             }
-            else
+
+            delay(100000); 
+
+            /* 2) Read accel 6 bytes: TXRX {0x3B} then read 6 bytes */
             {
-                const char badmsg[] = " : NACK  err=";
-                usart2_write_string((const uint8_t*)badmsg, sizeof(badmsg) - 1);
-                const char crlf[] = "\r\n";
-                usart2_write_string((const uint8_t*)crlf, sizeof(crlf) - 1);
+                for (size_t i = 0; i < sizeof(g_rx6); i++) g_rx6[i] = 0;
+
+                i2c_xfer_t x = {0};
+                x.addr7  = IMU_ADDR7;
+                x.kind   = I2C_XFER_TXRX;
+                x.tx     = &g_reg_accel;
+                x.tx_len = 1;
+                x.rx     = g_rx6;
+                x.rx_len = sizeof(g_rx6);
+                x.opts   = I2C_OPT_SEND_STOP; /* fine to request STOP at end */
+                x.done   = i2c_done_cb;
+                x.user   = NULL;
+
+                g_i2c_done = false;
+                if (!i2c1_submit(&x))
+                {
+                    usart2_write_cstr("i2c1_submit(txrx) failed (busy/bad param)\r\n");
+                    goto loop_end;
+                }
+
+                while (!g_i2c_done) { /* spinning... but in i2c */ }
+
+                usart2_write_cstr("MPU6050 accel bytes: ");
+                if (g_i2c_status == I2C_STATUS_OK)
+                {
+                    for (size_t i = 0; i < sizeof(g_rx6); i++)
+                    {
+                        usart2_write_hex8(g_rx6[i]);
+                        usart2_write_cstr(" ");
+                    }
+                    usart2_write_cstr("\r\n");
+                }
+                else
+                {
+                    usart2_write_cstr("ERR flags=0x");
+                    usart2_write_hex8((uint8_t)((g_i2c_err >> 24) & 0xFF));
+                    usart2_write_hex8((uint8_t)((g_i2c_err >> 16) & 0xFF));
+                    usart2_write_hex8((uint8_t)((g_i2c_err >>  8) & 0xFF));
+                    usart2_write_hex8((uint8_t)((g_i2c_err >>  0) & 0xFF));
+                    usart2_write_cstr("\r\n");
+                }
             }
         }
         else
         {
-            const char help[] =
-                "\r\nType 'probe' or 'i2c'\r\n";
-            usart2_write_string((const uint8_t*)help, sizeof(help) - 1);
+            usart2_write_cstr("Commands: i2c | probe\r\n");
         }
 
-        delay(500000);
+loop_end:
+        delay(200000);
         gpio_clear(GPIOA, 5);
-        delay(500000000);
+        delay(200000);
     }
 }
 
-void SystemClock_Config(void)
-{
-}
-
-void Error_Handler(void)
-{
-    while (1) { }
-}
-
-#ifdef USE_FULL_ASSERT
-#endif
+/* Stubs */
+void SystemClock_Config(void) {}
+void Error_Handler(void) { while (1) {} }
 

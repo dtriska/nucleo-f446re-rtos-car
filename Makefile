@@ -30,7 +30,8 @@ Core/Src/newlib_stubs.c \
 Core/Src/sysmem.c \
 Core/Src/gpio.c \
 Core/Src/uart.c \
-Core/Src/i2c.c
+Core/Src/i2c.c \
+Core/Src/i2c_int.c
 
 ASM_SOURCES = \
 startup_stm32f446xx.s
