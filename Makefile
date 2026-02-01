@@ -31,7 +31,8 @@ Core/Src/sysmem.c \
 Core/Src/gpio.c \
 Core/Src/uart.c \
 Core/Src/i2c.c \
-Core/Src/i2c_int.c
+Core/Src/i2c_int.c \
+Core/Src/spi.c
 
 ASM_SOURCES = \
 startup_stm32f446xx.s

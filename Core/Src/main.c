@@ -1,205 +1,149 @@
-/**
-  * @file    main.c
-  */
-
-#include "gpio.h"
-#include "uart.h"
-#include "i2c.h"
-#include "i2c_int.h"
-
+#include "spi.h"
+#include "stm32f446xx.h"
 #include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
 
-/* ---------- local helpers ---------- */
+#define TFT_CS_PORT          GPIOB
+#define TFT_CS_PIN           6      // D10
 
-static void delay(volatile uint32_t cnt)
+#define TFT_DC_PORT          GPIOA
+#define TFT_DC_PIN           8      // D7
+
+#define TFT_RST_PORT         GPIOB
+#define TFT_RST_PIN          10     // D8
+
+/* ---------- Helpers ---------- */
+static void delay_cycles(volatile uint32_t c) { while (c--) __NOP(); }
+static void delay_ms(uint32_t ms)
 {
-    while (cnt--) { __asm volatile ("nop"); }
+    // crude delay for ~16MHz core
+    while (ms--) delay_cycles(16000);
 }
 
-static void usart2_write_cstr(const char *s)
+static inline void pin_high(GPIO_TypeDef* port, uint32_t pin) { port->BSRR = (1u << pin); }
+static inline void pin_low (GPIO_TypeDef* port, uint32_t pin) { port->BSRR = (1u << (pin + 16u)); }
+
+static inline void tft_select(void)   { pin_low (TFT_CS_PORT, TFT_CS_PIN); }
+static inline void tft_deselect(void) { pin_high(TFT_CS_PORT, TFT_CS_PIN); }
+
+static void tft_cmd(uint8_t c)
 {
-    const uint8_t *p = (const uint8_t *)s;
-    size_t n = 0;
-    while (p[n] != 0) n++;
-    usart2_write_string(p, n);
+    pin_low(TFT_DC_PORT, TFT_DC_PIN);
+    tft_select();
+    uint32_t err = 0;
+    spi1_write(&c, 1, &err);
+    tft_deselect();
 }
 
-static void usart2_write_hex8(uint8_t v)
+static void tft_data(const uint8_t* d, uint32_t n)
 {
-    static const char hex[] = "0123456789ABCDEF";
-    uint8_t out[2];
-    out[0] = (uint8_t)hex[(v >> 4) & 0xF];
-    out[1] = (uint8_t)hex[(v >> 0) & 0xF];
-    usart2_write_string(out, 2);
+    pin_high(TFT_DC_PORT, TFT_DC_PIN);
+    tft_select();
+    uint32_t err = 0;
+    spi1_write(d, n, &err);
+    tft_deselect();
 }
 
-/* ---------- MPU6050 test config ---------- */
-
-#define IMU_ADDR7        0x68u
-#define UART_RX_MAX      64u
-
-/* Shared state for async completion */
-static volatile bool g_i2c_done = false;
-static volatile i2c_status_t g_i2c_status = I2C_STATUS_ERR;
-static volatile uint32_t g_i2c_err = 0;
-
-static uint8_t g_rx6[6] = {0};
-static uint8_t g_wake2[2] = { 0x6B, 0x00 }; /* PWR_MGMT_1 <- 0 */
-static uint8_t g_reg_accel = 0x3B;         /* ACCEL_XOUT_H */
-
-static void i2c_done_cb(i2c_status_t status, uint32_t err_flags, void *user)
+static void tft_data8(uint8_t v)
 {
-    (void)user;
-    g_i2c_status = status;
-    g_i2c_err = err_flags;
-    g_i2c_done = true;
+    pin_high(TFT_DC_PORT, TFT_DC_PIN);
+    tft_select();
+    uint32_t err = 0;
+    spi1_write(&v, 1, &err);
+    tft_deselect();
 }
 
-static bool streq_cmd(const uint8_t *buf, const char *cmd)
+static void tft_reset(void)
 {
-    size_t i = 0;
-    while (cmd[i] != 0)
+    pin_low(TFT_RST_PORT, TFT_RST_PIN);
+    delay_ms(20);
+    pin_high(TFT_RST_PORT, TFT_RST_PIN);
+    delay_ms(120);
+}
+
+static void tft_set_addr_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    uint8_t buf[4];
+
+    tft_cmd(0x2A); // CASET
+    buf[0] = (x0 >> 8) & 0xFF; buf[1] = x0 & 0xFF;
+    buf[2] = (x1 >> 8) & 0xFF; buf[3] = x1 & 0xFF;
+    tft_data(buf, 4);
+
+    tft_cmd(0x2B); // RASET
+    buf[0] = (y0 >> 8) & 0xFF; buf[1] = y0 & 0xFF;
+    buf[2] = (y1 >> 8) & 0xFF; buf[3] = y1 & 0xFF;
+    tft_data(buf, 4);
+
+    tft_cmd(0x2C); // RAMWR
+}
+
+static void tft_fill_color_565(uint16_t color, uint16_t w, uint16_t h)
+{
+    tft_set_addr_window(0, 0, (uint16_t)(w - 1), (uint16_t)(h - 1));
+
+    pin_high(TFT_DC_PORT, TFT_DC_PIN);
+    tft_select();
+
+    uint8_t hi = (color >> 8) & 0xFF;
+    uint8_t lo = color & 0xFF;
+    uint32_t err = 0;
+    uint32_t px = (uint32_t)w * (uint32_t)h;
+    while (px--)
     {
-        if (buf[i] != (uint8_t)cmd[i]) return false;
-        i++;
+        spi1_write(&hi, 1, &err);
+        spi1_write(&lo, 1, &err);
     }
-    /* allow trailing CR/LF or 0 */
-    return (buf[i] == 0 || buf[i] == '\r' || buf[i] == '\n');
+
+    tft_deselect();
 }
 
-/* ---------- main ---------- */
+static void tft_min_init(void)
+{
+    tft_cmd(0x01); // SWRESET
+    delay_ms(150);
+
+    tft_cmd(0x11); // SLPOUT
+    delay_ms(150);
+
+    tft_cmd(0x3A); // COLMOD
+    tft_data8(0x05); // 16-bit color
+    delay_ms(10);
+
+    tft_cmd(0x36); // MADCTL
+    tft_data8(0x00); // basic orientation
+
+    tft_cmd(0x29); // DISPON
+    delay_ms(100);
+}
 
 int main(void)
 {
-    // SystemClock_Config(); 
+    spi1_init();
 
-    /* LED (PA5) */
-    gpio_enable_clock(GPIOA);
-    gpio_config_output(GPIOA, 5, GPIO_OUTPUT_PP, GPIO_PULL_NONE, GPIO_SPEED_MEDIUM);
+    // quick pin toggle sanity for el scope
+    for (int i = 0; i < 2; i++) {
+        pin_low(TFT_CS_PORT, TFT_CS_PIN); delay_ms(50);
+        pin_high(TFT_CS_PORT, TFT_CS_PIN); delay_ms(50);
+        pin_low(TFT_DC_PORT, TFT_DC_PIN); delay_ms(50);
+        pin_high(TFT_DC_PORT, TFT_DC_PIN); delay_ms(50);
+        pin_low(TFT_RST_PORT, TFT_RST_PIN); delay_ms(50);
+        pin_high(TFT_RST_PORT, TFT_RST_PIN); delay_ms(50);
+    }
 
-    /* UART */
-    usart2_init(115200, true, true);
-    usart2_write_cstr("\r\nBoot\r\nType: i2c\r\n");
+    tft_reset();
+    tft_min_init();
 
-    /* I2C IRQ driver */
-    i2c1_init_irq(16000000u, 100000u);
-
-    uint8_t rx[UART_RX_MAX] = {0};
+    // ST7735 modules are 128x160
+    const uint16_t W = 128, H = 160;
 
     while (1)
     {
-        gpio_set(GPIOA, 5);
-
-        /* Clear RX buffer */
-        for (size_t i = 0; i < UART_RX_MAX; i++) rx[i] = 0;
-
-        /* Blocking read line */
-        usart2_read_string(rx);
-
-        /* Echo */
-        {
-            size_t n = 0;
-            while (n < UART_RX_MAX && rx[n] != 0) n++;
-            usart2_write_string(rx, n);
-            usart2_write_cstr("\r\n");
-        }
-
-        if (streq_cmd(rx, "i2c") || streq_cmd(rx, "probe"))
-        {
-            /* 1) Wake MPU6050: write {0x6B,0x00} */
-            {
-                i2c_xfer_t x = {0};
-                x.addr7  = IMU_ADDR7;
-                x.kind   = I2C_XFER_TX;
-                x.tx     = g_wake2;
-                x.tx_len = sizeof(g_wake2);
-                x.opts   = I2C_OPT_SEND_STOP;
-                x.done   = i2c_done_cb;
-                x.user   = NULL;
-
-                g_i2c_done = false;
-                if (!i2c1_submit(&x))
-                {
-                    usart2_write_cstr("i2c1_submit(wake) failed (busy/bad param)\r\n");
-                    goto loop_end;
-                }
-
-                while (!g_i2c_done) { /* spin me round baby */ }
-
-                if (g_i2c_status != I2C_STATUS_OK)
-                {
-                    usart2_write_cstr("WAKE ERR flags=0x");
-                    usart2_write_hex8((uint8_t)((g_i2c_err >> 24) & 0xFF));
-                    usart2_write_hex8((uint8_t)((g_i2c_err >> 16) & 0xFF));
-                    usart2_write_hex8((uint8_t)((g_i2c_err >>  8) & 0xFF));
-                    usart2_write_hex8((uint8_t)((g_i2c_err >>  0) & 0xFF));
-                    usart2_write_cstr("\r\n");
-                    goto loop_end;
-                }
-            }
-
-            delay(100000); 
-
-            /* 2) Read accel 6 bytes: TXRX {0x3B} then read 6 bytes */
-            {
-                for (size_t i = 0; i < sizeof(g_rx6); i++) g_rx6[i] = 0;
-
-                i2c_xfer_t x = {0};
-                x.addr7  = IMU_ADDR7;
-                x.kind   = I2C_XFER_TXRX;
-                x.tx     = &g_reg_accel;
-                x.tx_len = 1;
-                x.rx     = g_rx6;
-                x.rx_len = sizeof(g_rx6);
-                x.opts   = I2C_OPT_SEND_STOP; /* fine to request STOP at end */
-                x.done   = i2c_done_cb;
-                x.user   = NULL;
-
-                g_i2c_done = false;
-                if (!i2c1_submit(&x))
-                {
-                    usart2_write_cstr("i2c1_submit(txrx) failed (busy/bad param)\r\n");
-                    goto loop_end;
-                }
-
-                while (!g_i2c_done) { /* spinning... but in i2c */ }
-
-                usart2_write_cstr("MPU6050 accel bytes: ");
-                if (g_i2c_status == I2C_STATUS_OK)
-                {
-                    for (size_t i = 0; i < sizeof(g_rx6); i++)
-                    {
-                        usart2_write_hex8(g_rx6[i]);
-                        usart2_write_cstr(" ");
-                    }
-                    usart2_write_cstr("\r\n");
-                }
-                else
-                {
-                    usart2_write_cstr("ERR flags=0x");
-                    usart2_write_hex8((uint8_t)((g_i2c_err >> 24) & 0xFF));
-                    usart2_write_hex8((uint8_t)((g_i2c_err >> 16) & 0xFF));
-                    usart2_write_hex8((uint8_t)((g_i2c_err >>  8) & 0xFF));
-                    usart2_write_hex8((uint8_t)((g_i2c_err >>  0) & 0xFF));
-                    usart2_write_cstr("\r\n");
-                }
-            }
-        }
-        else
-        {
-            usart2_write_cstr("Commands: i2c | probe\r\n");
-        }
-
-loop_end:
-        delay(200000);
-        gpio_clear(GPIOA, 5);
-        delay(200000);
+        tft_fill_color_565(0xF800, W, H); delay_ms(500); // red
+        tft_fill_color_565(0x07E0, W, H); delay_ms(500); // green
+        tft_fill_color_565(0x001F, W, H); delay_ms(500); // blue
+        tft_fill_color_565(0xFFFF, W, H); delay_ms(500); // white
+        tft_fill_color_565(0x0000, W, H); delay_ms(500); // black
     }
 }
-
-/* Stubs */
-void SystemClock_Config(void) {}
-void Error_Handler(void) { while (1) {} }
 
