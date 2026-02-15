@@ -25,3 +25,5 @@ Thumbs.db
 # CubeMX (optional if you have it)
 *.ioc.bak
 
+MotorController/PWM_Pico_W_Direction/WifiKey.h
+
